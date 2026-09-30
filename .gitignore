@@ -1,0 +1,15 @@
+﻿__pycache__/
+*.pyc
+
+.venv/
+venv/
+.env
+
+node_modules/
+dist/
+build/
+
+*.tif
+*.zip
+
+dem_cache/

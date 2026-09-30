@@ -1,0 +1,82 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body, html, #root {
+  width: 100%;
+  height: 100%;
+  background: #090d16;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: #d1d5db;
+  overflow: hidden;
+  font-size: 11px;
+}
+
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: #0d131f;
+}
+::-webkit-scrollbar-thumb {
+  background: #1f293d;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #374151;
+}
+
+input[type="range"] {
+  accent-color: #38bdf8;
+  height: 4px;
+}
+
+select, input, textarea {
+  font-family: inherit;
+}
+
+/* Dam Ripple Wave Ping Animation */
+@keyframes damPing {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+.dam-pulse-ring {
+  position: absolute;
+  width: 32px;
+  height: 32px;
+  background: rgba(239, 68, 68, 0.45);
+  border-radius: 50%;
+  animation: damPing 1.8s cubic-bezier(0, 0.2, 0.8, 1) infinite;
+}
+
+.dam-center-core {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  background: #EF4444;
+  border-radius: 50%;
+  border: 2px solid #FFFFFF;
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.9);
+  z-index: 2;
+}
+
+/* Water Particle Ripple */
+@keyframes waterPulse {
+  0% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 0.9; transform: scale(1.2); }
+  100% { opacity: 0.3; transform: scale(0.8); }
+}
+
+.water-particle-pulse {
+  animation: waterPulse 1.2s infinite ease-in-out;
+}
