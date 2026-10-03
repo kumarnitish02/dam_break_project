@@ -1,0 +1,103 @@
+{
+  "dam": {
+    "name": "Hidkal (Raja Lakhamagouda) Dam",
+    "latitude": 16.14625,
+    "longitude": 74.64259
+  },
+  "model": "ANUGA 4.0.1 2D shallow-water, 30 m SRTM DEM, ~300 m mesh, uniform Manning n = 0.035",
+  "scenarios": {
+    "froehlich": {
+      "label": "Froehlich-type hydrograph (peak 51,570 m3/s)",
+      "peak_flow_m3s": 51570,
+      "time_to_peak_h": 4.41,
+      "volume_released_km3": 1.23,
+      "flood_area_km2": 212.8,
+      "exposure_by_depth": [
+        {
+          "depth_class": "0.05-0.5 m",
+          "people": 9421,
+          "cropland_km2": 6.8,
+          "builtup_km2": 0.33
+        },
+        {
+          "depth_class": "0.5-2 m",
+          "people": 23175,
+          "cropland_km2": 17.8,
+          "builtup_km2": 0.87
+        },
+        {
+          "depth_class": "2-5 m",
+          "people": 61078,
+          "cropland_km2": 33.7,
+          "builtup_km2": 2.01
+        },
+        {
+          "depth_class": "> 5 m",
+          "people": 86947,
+          "cropland_km2": 63.5,
+          "builtup_km2": 1.89
+        },
+        {
+          "depth_class": "TOTAL",
+          "people": 180621,
+          "cropland_km2": 121.8,
+          "builtup_km2": 5.1
+        }
+      ],
+      "geojson_file": "hidkal_froehlich_flood.geojson"
+    },
+    "paper_peak": {
+      "label": "Published-peak hydrograph (peak 78,455 m3/s)",
+      "peak_flow_m3s": 78455,
+      "time_to_peak_h": 3.33,
+      "volume_released_km3": 1.27,
+      "flood_area_km2": 232.7,
+      "exposure_by_depth": [
+        {
+          "depth_class": "0.05-0.5 m",
+          "people": 6940,
+          "cropland_km2": 7.6,
+          "builtup_km2": 0.25
+        },
+        {
+          "depth_class": "0.5-2 m",
+          "people": 28913,
+          "cropland_km2": 17.4,
+          "builtup_km2": 1.14
+        },
+        {
+          "depth_class": "2-5 m",
+          "people": 52838,
+          "cropland_km2": 34.0,
+          "builtup_km2": 1.85
+        },
+        {
+          "depth_class": "> 5 m",
+          "people": 109472,
+          "cropland_km2": 75.1,
+          "builtup_km2": 2.52
+        },
+        {
+          "depth_class": "TOTAL",
+          "people": 198163,
+          "cropland_km2": 134.1,
+          "builtup_km2": 5.76
+        }
+      ],
+      "geojson_file": "hidkal_paper_peak_flood.geojson"
+    }
+  },
+  "notes": [
+    "Flood extent is cut off at the east edge of the model box, so area and exposure are lower bounds.",
+    "The published-peak scenario takes its peak flow from the published HEC-RAS study (Bharath et al., 2021); it is an input, not a prediction.",
+    "Arrival of peak depth in this model is 2-3 times slower than the published study, so it must not be used for evacuation lead time.",
+    "Exposure counts people (WorldPop 2020, modelled) and land cover (ESA WorldCover 2021) inside the flood footprint. It is not a casualty or monetary-loss estimate.",
+    "Depth in narrow gorges and wide flat plains is poorly resolved by the 30 m DEM and ~300 m mesh.",
+    "The reservoir area upstream of the dam is excluded."
+  ],
+  "validation": {
+    "published_study": "Bharath et al. (2021), Environmental Challenges 5, 100401 (1D HEC-RAS, overtopping scenario)",
+    "published_area_km2": 79.2,
+    "note": "Published area is for a 22 river-km stretch. The published-peak model run floods 79.0 km2 within 15 km and 116.8 km2 within 22 km straight-line distance of the dam."
+  }
+}

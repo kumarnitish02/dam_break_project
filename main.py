@@ -15,10 +15,26 @@ import numpy as np
 # Folder path ensure karein
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from get_dem import fetch_dem_raster
-from flood_simulation import simulate_hydrodynamic_routing, simulate_sph_particles
-from visualize_flood import generate_analytical_preview
-from infrastructure_analysis import fetch_downstream_infrastructure, analyze_compromised_infrastructure
+# -------------------------------------------------------------------------
+# Simulation modules (need rasterio / geopandas). If they fail to import
+# (for example blocked on a machine), the server still starts and the
+# /validated/hidkal endpoints keep working.
+# -------------------------------------------------------------------------
+SIM_IMPORT_ERROR = None
+try:
+    from get_dem import fetch_dem_raster
+    from flood_simulation import simulate_hydrodynamic_routing, simulate_sph_particles
+    from visualize_flood import generate_analytical_preview
+    from infrastructure_analysis import fetch_downstream_infrastructure, analyze_compromised_infrastructure
+except Exception as e:
+    SIM_IMPORT_ERROR = str(e)
+    print(f"[SIM Notice] Simulation modules could not be imported: {e}")
+    print("[SIM Notice] /simulate and the download endpoints are disabled. /validated/hidkal still works.")
+
+SIM_UNAVAILABLE_RESPONSE = {
+    "error": "Simulation modules are not available on this machine.",
+    "detail": SIM_IMPORT_ERROR,
+}
 
 # -------------------------------------------------------------------------
 # Earth Engine Initialization (Safe Fallback)
@@ -27,7 +43,7 @@ ee_available = False
 try:
     import ee
     try:
-        ee.Initialize(project='infinite-sight-507521-s6')
+        ee.Initialize(project='hydrovision-510421')
         ee_available = True
         print("[GEE] Earth Engine initialized successfully.")
     except Exception as e:
@@ -38,7 +54,7 @@ except ImportError:
 # Primary FastAPI Application
 app = FastAPI(
     title="Universal Dam Break Inundation & HADR DSS",
-    description="Multi-scale hydrodynamic breach routing and disaster intelligence engine."
+    description="Dam-break flood screening, validated ANUGA results for Hidkal, and HADR exposure indicators."
 )
 
 app.add_middleware(
@@ -141,7 +157,11 @@ def froehlich_breach(dam_height: float, storage_volume: float):
 # -------------------------------------------------------------------------
 @app.get("/")
 def root():
-    return {"message": "Universal Dam Break & Flood Simulation API Operational", "status": "online"}
+    return {
+        "message": "Dam Break Flood Screening & Validated Results API Operational",
+        "status": "online",
+        "simulation_modules": "available" if SIM_IMPORT_ERROR is None else "unavailable",
+    }
 
 @app.get("/dams")
 def get_dams():
@@ -195,15 +215,25 @@ async def upload_dem(file: UploadFile = File(...)):
     return {"status": "success", **meta}
 
 # -------------------------------------------------------------------------
-# 4. Real 2D Hydrodynamic & SPH Simulation Engine
+# 4. Fast screening simulation (bathtub + travel-time routing, random-walk proxy)
 # -------------------------------------------------------------------------
+SCREENING_NOTE = (
+    "Fast screening estimate only. The flood extent comes from a fixed water-level rise spread over "
+    "connected low ground with travel-time routing, and the 'SPH' result is a particle random-walk "
+    "proxy, not a true SPH or shallow-water solver. Population is estimated as area x 350 per km2. "
+    "For a dam with a validated 2D shallow-water run, use /validated/hidkal."
+)
+
 @app.get("/simulate")
 def simulate(
     dam_name: str = Query(..., description="Target dam identifier"),
     storage_percent: float = Query(70.0, description="Simulated capacity % (1-100)")
 ):
-    print(f"\n[*] Processing REAL physics simulation: {dam_name} ({storage_percent}%)")
-    
+    if SIM_IMPORT_ERROR is not None:
+        return JSONResponse(status_code=503, content=SIM_UNAVAILABLE_RESPONSE)
+
+    print(f"\n[*] Processing screening simulation: {dam_name} ({storage_percent}%)")
+
     # Check uploaded files registry first, then 4,661 prebuilt dams
     dam = UPLOADED_REGISTRY.get(dam_name)
     if not dam:
@@ -224,24 +254,24 @@ def simulate(
     current_storage = capacity * fill_ratio
     breach = froehlich_breach(height, current_storage)
 
-    # 1. Real Copernicus DEM Ingestion
-    print(" -> Loading real DEM elevation surface...")
+    # 1. DEM ingestion
+    print(" -> Loading DEM elevation surface...")
     dem, transform, profile, _ = fetch_dem_raster(lat, lon, dam["dam_name"])
 
-    # 2. Real 2D Shallow Water Routing
-    print(" -> Executing 2D Shallow Water Routing (SWE)...")
+    # 2. Screening flood routing (bathtub + travel-time)
+    print(" -> Executing screening flood routing (water-level rise + travel time)...")
     flood_rise_depth = max(2.5, math.pow((breach["peak_outflow_cumecs"] * 0.035) / (max(breach["breach_width_m"], 20.0) * math.sqrt(0.002)), 0.6))
     raw_flood = simulate_hydrodynamic_routing(lat, lon, dem, transform, flood_rise_m=flood_rise_depth)
 
-    # 3. Real SPH Particle Proxy
-    print(" -> Executing SPH Lagrangian Particle Routing...")
+    # 3. Particle random-walk proxy (labelled SPH in the UI for compatibility)
+    print(" -> Executing particle random-walk proxy...")
     raw_sph = simulate_sph_particles(lat, lon, dem, transform)
 
     # Clean GeoJSON dictionaries
     hydro_geojson = json.loads(raw_flood["geojson"]) if isinstance(raw_flood.get("geojson"), str) else raw_flood.get("geojson")
     sph_geojson = json.loads(raw_sph["geojson"]) if isinstance(raw_sph.get("geojson"), str) else raw_sph.get("geojson")
 
-    # 4. Real OSM Infrastructure Analysis (with Safe Timeout)
+    # 4. OSM Infrastructure Analysis (with Safe Timeout)
     print(" -> Intersecting downstream exposed infrastructure...")
     infra_impact = None
     try:
@@ -259,7 +289,8 @@ def simulate(
                 "bridges": max(1, int(flooded_sq_km / 10)),
                 "highways_km": round(flooded_sq_km * 0.18, 1)
             },
-            "geojson": None
+            "geojson": None,
+            "note": "Estimated from flooded area because OpenStreetMap data could not be fetched."
         }
 
     # Generate Diagnostic Preview Image
@@ -270,10 +301,11 @@ def simulate(
 
     area_hydro = float(raw_flood.get("flooded_area_sq_km", 9.5))
     area_sph = float(raw_sph.get("area_sq_km", 8.4))
-    print(" -> Simulation completed successfully.")
+    print(" -> Screening simulation completed.")
 
     return {
         "dam_name": dam["dam_name"],
+        "method_note": SCREENING_NOTE,
         "storage_analysis": {
             "total_capacity_bcm": round(capacity / 1e9, 3),
             "current_storage_bcm": round(current_storage / 1e9, 3),
@@ -299,7 +331,7 @@ def simulate(
     }
 
 # -------------------------------------------------------------------------
-# 5. Sentinel-1 SAR Realtime Earth Engine Extraction
+# 5. Sentinel-1 SAR recent water mask (Earth Engine)
 # -------------------------------------------------------------------------
 @app.get("/realtime-flood")
 def realtime_flood(dam_lat: float = Query(...), dam_lon: float = Query(...), buffer_km: float = 15.0):
@@ -327,16 +359,24 @@ def realtime_flood(dam_lat: float = Query(...), dam_lon: float = Query(...), buf
         return {
             "status": "success",
             "images_used": collection.size().getInfo(),
+            "note": (
+                "Dark-pixel (VV < -15 dB) mask from the last 30 days of Sentinel-1. It includes permanent "
+                "water such as reservoirs and rivers, may cover only part of the area, and is not a "
+                "confirmed flood map."
+            ),
             "geojson": water_vectors.getInfo()
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 # -------------------------------------------------------------------------
-# 6. Real Shapefile (.zip) Export Endpoint
+# 6. Shapefile (.zip) Export Endpoint (screening result)
 # -------------------------------------------------------------------------
 @app.get("/download-shapefile")
 def download_shapefile(dam_name: str = Query(...)):
+    if SIM_IMPORT_ERROR is not None:
+        return JSONResponse(status_code=503, content=SIM_UNAVAILABLE_RESPONSE)
+
     dam = UPLOADED_REGISTRY.get(dam_name)
     if not dam:
         dams = load_and_normalize_dams_dataset()
@@ -367,10 +407,13 @@ def download_shapefile(dam_name: str = Query(...)):
     return FileResponse(zip_path, media_type="application/zip", filename=zip_path)
 
 # -------------------------------------------------------------------------
-# 7. Real Google Earth KML Export Endpoint
+# 7. Google Earth KML Export Endpoint (screening result)
 # -------------------------------------------------------------------------
 @app.get("/download-kml")
 def download_kml(dam_name: str = Query(...)):
+    if SIM_IMPORT_ERROR is not None:
+        return JSONResponse(status_code=503, content=SIM_UNAVAILABLE_RESPONSE)
+
     dam = UPLOADED_REGISTRY.get(dam_name)
     if not dam:
         dams = load_and_normalize_dams_dataset()
@@ -393,6 +436,30 @@ def download_kml(dam_name: str = Query(...)):
         print(f"[KML Export Notice] {e}")
 
     return FileResponse(kml_path, media_type="application/vnd.google-earth.kml+xml", filename=kml_path)
+
+# -------------------------------------------------------------------------
+# 8. Validated ANUGA results for Hidkal (precomputed in Google Colab)
+# -------------------------------------------------------------------------
+HIDKAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hidkal_anuga")
+HIDKAL_SCENARIOS = ("froehlich", "paper_peak")
+
+@app.get("/validated/hidkal")
+def validated_hidkal():
+    path = os.path.join(HIDKAL_DIR, "hidkal_summary.json")
+    if not os.path.exists(path):
+        return JSONResponse(status_code=404, content={"error": "hidkal_anuga/hidkal_summary.json not found"})
+    with open(path, encoding="utf-8") as f:
+        return JSONResponse(content=json.load(f))
+
+@app.get("/validated/hidkal/{scenario}")
+def validated_hidkal_flood(scenario: str):
+    if scenario not in HIDKAL_SCENARIOS:
+        return JSONResponse(status_code=404, content={"error": f"unknown scenario, use one of {list(HIDKAL_SCENARIOS)}"})
+    path = os.path.join(HIDKAL_DIR, f"hidkal_{scenario}_flood.geojson")
+    if not os.path.exists(path):
+        return JSONResponse(status_code=404, content={"error": f"hidkal_anuga/hidkal_{scenario}_flood.geojson not found"})
+    with open(path, encoding="utf-8") as f:
+        return JSONResponse(content=json.load(f))
 
 if __name__ == "__main__":
     import uvicorn
