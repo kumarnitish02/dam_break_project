@@ -92,7 +92,7 @@ export default function App() {
 
   // Field observations
   const [fieldObs, setFieldObs] = useState({
-    waterLevel: '', rainfall: '', lat: '11.6244', lon: '92.6591',
+    waterLevel: '', rainfall: '', lat: '31.4113', lon: '76.4335',
     severity: 'Moderate', notes: '', relayNDRF: true
   });
   const [obsSubmitted, setObsSubmitted] = useState(false);
@@ -298,8 +298,8 @@ export default function App() {
 
     if (mapInstanceRef.current) { mapInstanceRef.current.remove(); mapInstanceRef.current = null; }
 
-    const lat = currentDam ? currentDam.latitude : 11.634;
-    const lon = currentDam ? currentDam.longitude : 92.684;
+    const lat = currentDam ? currentDam.latitude : 31.4113;
+    const lon = currentDam ? currentDam.longitude : 76.4335;
 
     try {
       const map = L.map(mapContainerRef.current, { zoomControl: false, attributionControl: false }).setView([lat, lon], 13);
