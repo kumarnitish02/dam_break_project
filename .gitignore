@@ -13,3 +13,4 @@ build/
 *.zip
 
 dem_cache/
+field_observations.jsonl

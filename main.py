@@ -5,8 +5,9 @@ import json
 import shutil
 import zipfile
 from datetime import datetime, timedelta
+from typing import Optional
 
-from fastapi import FastAPI, Query, UploadFile, File
+from fastapi import FastAPI, Query, UploadFile, File, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 import pandas as pd
@@ -68,16 +69,36 @@ app.add_middleware(
 CSV_FILE = "Dams.csv"
 CACHED_DAMS = []
 UPLOAD_DIR = "uploaded_dem"
+OBS_FILE = "field_observations.jsonl"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Registry for uploaded custom DEMs
 UPLOADED_REGISTRY = {}
+
 
 def clean_val(val, default=""):
     if pd.isna(val) or val is None:
         return default
     s = str(val).strip()
     return default if s.lower() == "nan" else s
+
+
+def safe_filename(name: str) -> str:
+    return name.replace(" ", "_").lower().replace("(", "").replace(")", "").replace("/", "_").replace("\\", "_")
+
+
+def find_dam(dam_name: str):
+    """Uploaded registry first, then the dam dataset (exact, then partial match)."""
+    dam = UPLOADED_REGISTRY.get(dam_name)
+    if dam:
+        return dam
+    dams = load_and_normalize_dams_dataset()
+    key = dam_name.strip().lower()
+    dam = next((d for d in dams if d["dam_name"].strip().lower() == key), None)
+    if not dam:
+        dam = next((d for d in dams if key in d["dam_name"].strip().lower()), None)
+    return dam
+
 
 # -------------------------------------------------------------------------
 # 1. 4,661 Indian Dams Registry Loader
@@ -135,6 +156,7 @@ def load_and_normalize_dams_dataset():
     print(f"[REGISTRY SUCCESS] Successfully loaded {len(CACHED_DAMS)} Indian Dams from {csv_path}!")
     return CACHED_DAMS
 
+
 # -------------------------------------------------------------------------
 # 2. Empirical Hydraulics (Froehlich 2008 Formulation)
 # -------------------------------------------------------------------------
@@ -152,6 +174,40 @@ def froehlich_breach(dam_height: float, storage_volume: float):
         "peak_outflow_cumecs": round(float(peak_outflow), 2)
     }
 
+
+def build_hadr_and_loss(infra_impact):
+    """
+    Derive HADR / loss indicators ONLY from what the infrastructure analysis returned.
+    Anything we cannot compute stays None so the UI shows a dash instead of an invented number.
+    P1 = critical sites (hospitals + schools + bridges) inside the flood footprint.
+    """
+    s = (infra_impact or {}).get("summary") or {}
+
+    def num(k):
+        v = s.get(k)
+        return v if isinstance(v, (int, float)) else None
+
+    hosp, schools, bridges, hw = num("hospitals"), num("schools"), num("bridges"), num("highways_km")
+    parts = [x for x in (hosp, schools, bridges) if x is not None]
+    critical = int(sum(parts)) if parts else None
+
+    loss = {
+        "roads_km": hw,
+        "cropland_ha": None,      # not computed by the screening model
+        "hospitals": hosp,
+        "critical_sites": critical,
+        "zones": None,
+    }
+    hadr = {
+        "p1": critical,
+        "p2": None,               # needs a monitor-zone analysis that does not exist yet
+        "p3": None,
+        "first_arrival_min": None,  # needs a time-resolved solver
+        "infra_sites": critical,
+    }
+    return hadr, loss
+
+
 # -------------------------------------------------------------------------
 # API Endpoints
 # -------------------------------------------------------------------------
@@ -163,28 +219,31 @@ def root():
         "simulation_modules": "available" if SIM_IMPORT_ERROR is None else "unavailable",
     }
 
+
 @app.get("/dams")
 def get_dams():
     data = load_and_normalize_dams_dataset()
     return JSONResponse(content=data)
+
 
 # -------------------------------------------------------------------------
 # 3. Local Computer DEM / Terrain File Upload Endpoint
 # -------------------------------------------------------------------------
 @app.post("/upload-dem")
 async def upload_dem(file: UploadFile = File(...)):
-    file_path = os.path.join(UPLOAD_DIR, file.filename)
+    original_name = os.path.basename(file.filename or "upload")  # block path traversal
+    file_path = os.path.join(UPLOAD_DIR, original_name)
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    dam_name = os.path.splitext(file.filename)[0].replace("_", " ").title()
+    dam_name = os.path.splitext(original_name)[0].replace("_", " ").title()
     lat, lon = 11.634, 92.684
     grid_str = "1024 × 1024"
     res_str = "30 m (GLO-30)"
     crs_str = "EPSG:4326"
 
     # GeoTIFF/DEM metadata extraction
-    if file.filename.lower().endswith(('.tif', '.tiff', '.dem')):
+    if original_name.lower().endswith(('.tif', '.tiff', '.dem')):
         try:
             import rasterio
             with rasterio.open(file_path) as src:
@@ -199,7 +258,7 @@ async def upload_dem(file: UploadFile = File(...)):
 
     meta = {
         "dam_name": dam_name,
-        "file_name": file.filename,
+        "file_name": original_name,
         "latitude": round(lat, 5),
         "longitude": round(lon, 5),
         "height_m": 45.0,
@@ -214,6 +273,7 @@ async def upload_dem(file: UploadFile = File(...)):
     UPLOADED_REGISTRY[dam_name] = meta
     return {"status": "success", **meta}
 
+
 # -------------------------------------------------------------------------
 # 4. Fast screening simulation (bathtub + travel-time routing, random-walk proxy)
 # -------------------------------------------------------------------------
@@ -221,27 +281,25 @@ SCREENING_NOTE = (
     "Fast screening estimate only. The flood extent comes from a fixed water-level rise spread over "
     "connected low ground with travel-time routing, and the 'SPH' result is a particle random-walk "
     "proxy, not a true SPH or shallow-water solver. Population is estimated as area x 350 per km2. "
+    "Velocity, arrival time and cropland loss are not computed. "
     "For a dam with a validated 2D shallow-water run, use /validated/hidkal."
 )
+
 
 @app.get("/simulate")
 def simulate(
     dam_name: str = Query(..., description="Target dam identifier"),
-    storage_percent: float = Query(70.0, description="Simulated capacity % (1-100)")
+    storage_percent: float = Query(70.0, description="Simulated capacity % (1-100)"),
+    breach_width: Optional[float] = Query(None, description="Breach width override in metres"),
+    breach_time: Optional[float] = Query(None, description="Breach formation time override in minutes"),
+    duration: Optional[float] = Query(None, description="Animation duration in minutes (display only)"),
 ):
     if SIM_IMPORT_ERROR is not None:
         return JSONResponse(status_code=503, content=SIM_UNAVAILABLE_RESPONSE)
 
     print(f"\n[*] Processing screening simulation: {dam_name} ({storage_percent}%)")
 
-    # Check uploaded files registry first, then 4,661 prebuilt dams
-    dam = UPLOADED_REGISTRY.get(dam_name)
-    if not dam:
-        dams = load_and_normalize_dams_dataset()
-        dam = next((d for d in dams if d["dam_name"].strip().lower() == dam_name.strip().lower()), None)
-        if not dam:
-            dam = next((d for d in dams if dam_name.strip().lower() in d["dam_name"].strip().lower()), None)
-
+    dam = find_dam(dam_name)
     if not dam:
         return JSONResponse(status_code=404, content={"error": f"Dam '{dam_name}' not found."})
 
@@ -254,11 +312,22 @@ def simulate(
     current_storage = capacity * fill_ratio
     breach = froehlich_breach(height, current_storage)
 
+    # Operator overrides from the UI sliders
+    overrides = {}
+    if breach_width is not None and breach_width > 0:
+        breach["breach_width_m"] = round(float(breach_width), 2)
+        overrides["breach_width_m"] = breach["breach_width_m"]
+    if breach_time is not None and breach_time > 0:
+        breach["formation_time_hr"] = round(float(breach_time) / 60.0, 2)
+        overrides["formation_time_hr"] = breach["formation_time_hr"]
+
     # 1. DEM ingestion
     print(" -> Loading DEM elevation surface...")
     dem, transform, profile, _ = fetch_dem_raster(lat, lon, dam["dam_name"])
 
     # 2. Screening flood routing (bathtub + travel-time)
+    # Note: breach_width changes the flood depth through this formula.
+    # breach_time is reported only; it does not change the extent in this screening model.
     print(" -> Executing screening flood routing (water-level rise + travel time)...")
     flood_rise_depth = max(2.5, math.pow((breach["peak_outflow_cumecs"] * 0.035) / (max(breach["breach_width_m"], 20.0) * math.sqrt(0.002)), 0.6))
     raw_flood = simulate_hydrodynamic_routing(lat, lon, dem, transform, flood_rise_m=flood_rise_depth)
@@ -267,11 +336,13 @@ def simulate(
     print(" -> Executing particle random-walk proxy...")
     raw_sph = simulate_sph_particles(lat, lon, dem, transform)
 
-    # Clean GeoJSON dictionaries
     hydro_geojson = json.loads(raw_flood["geojson"]) if isinstance(raw_flood.get("geojson"), str) else raw_flood.get("geojson")
     sph_geojson = json.loads(raw_sph["geojson"]) if isinstance(raw_sph.get("geojson"), str) else raw_sph.get("geojson")
 
-    # 4. OSM Infrastructure Analysis (with Safe Timeout)
+    area_hydro = float(raw_flood.get("flooded_area_sq_km") or 0.0)
+    area_sph = float(raw_sph.get("area_sq_km") or 0.0)
+
+    # 4. OSM Infrastructure Analysis (with safe fallback)
     print(" -> Intersecting downstream exposed infrastructure...")
     infra_impact = None
     try:
@@ -281,31 +352,37 @@ def simulate(
         infra_impact = analyze_compromised_infrastructure(osm_raw, raw_flood.get("geojson"))
     except Exception as e:
         print(f" -> [OSM Notice] Handled with localized stats: {e}")
-        flooded_sq_km = float(raw_flood.get("flooded_area_sq_km", 9.5))
         infra_impact = {
             "summary": {
-                "hospitals": max(0, int(flooded_sq_km / 18)),
-                "schools": max(1, int(flooded_sq_km / 8)),
-                "bridges": max(1, int(flooded_sq_km / 10)),
-                "highways_km": round(flooded_sq_km * 0.18, 1)
+                "hospitals": max(0, int(area_hydro / 18)),
+                "schools": max(1, int(area_hydro / 8)),
+                "bridges": max(1, int(area_hydro / 10)),
+                "highways_km": round(area_hydro * 0.18, 1)
             },
             "geojson": None,
             "note": "Estimated from flooded area because OpenStreetMap data could not be fetched."
         }
 
-    # Generate Diagnostic Preview Image
     try:
         generate_analytical_preview(dem, raw_flood.get("flooded_raster"), dam["dam_name"])
     except Exception:
         pass
 
-    area_hydro = float(raw_flood.get("flooded_area_sq_km", 9.5))
-    area_sph = float(raw_sph.get("area_sq_km", 8.4))
+    pop = raw_flood.get("estimated_affected_population")
+    if pop is None:
+        pop = area_hydro * 350.0  # same rule the method note states
+    hadr, loss = build_hadr_and_loss(infra_impact)
+
     print(" -> Screening simulation completed.")
 
     return {
         "dam_name": dam["dam_name"],
         "method_note": SCREENING_NOTE,
+        "inputs": {
+            "storage_percent": round(fill_ratio * 100.0, 1),
+            "overrides": overrides,
+            "duration_min": duration,
+        },
         "storage_analysis": {
             "total_capacity_bcm": round(capacity / 1e9, 3),
             "current_storage_bcm": round(current_storage / 1e9, 3),
@@ -315,7 +392,10 @@ def simulate(
         "flood_simulation": {
             "flooded_area_sq_km": area_hydro,
             "flood_level_m": round(flood_rise_depth, 2),
-            "estimated_affected_population": int(raw_flood.get("estimated_affected_population", 8715)),
+            "max_velocity_ms": None,  # screening model has no velocity field
+            "estimated_affected_population": int(pop),
+            "hadr": hadr,
+            "loss_damage": loss,
             "geojson": hydro_geojson
         },
         "sph_simulation": {
@@ -329,6 +409,7 @@ def simulate(
             "difference_sq_km": round(abs(area_hydro - area_sph), 2)
         }
     }
+
 
 # -------------------------------------------------------------------------
 # 5. Sentinel-1 SAR recent water mask (Earth Engine)
@@ -369,36 +450,43 @@ def realtime_flood(dam_lat: float = Query(...), dam_lon: float = Query(...), buf
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+
 # -------------------------------------------------------------------------
-# 6. Shapefile (.zip) Export Endpoint (screening result)
+# 6. Exports of the screening result (shapefile, KML, raster)
 # -------------------------------------------------------------------------
+def _run_screening_for_export(dam_name: str):
+    dam = find_dam(dam_name)
+    if not dam:
+        dam = {"dam_name": dam_name, "latitude": 11.634, "longitude": 92.684, "height_m": 40.0}
+    lat, lon = float(dam["latitude"]), float(dam["longitude"])
+    dem, transform, profile, _ = fetch_dem_raster(lat, lon, dam_name)
+    res = simulate_hydrodynamic_routing(lat, lon, dem, transform)
+    return res, transform, profile
+
+
+def _features_gdf(res):
+    import geopandas as gpd
+    gj_str = res["geojson"] if isinstance(res["geojson"], str) else json.dumps(res["geojson"])
+    return gpd.GeoDataFrame.from_features(json.loads(gj_str)["features"], crs="EPSG:4326")
+
+
 @app.get("/download-shapefile")
 def download_shapefile(dam_name: str = Query(...)):
     if SIM_IMPORT_ERROR is not None:
         return JSONResponse(status_code=503, content=SIM_UNAVAILABLE_RESPONSE)
 
-    dam = UPLOADED_REGISTRY.get(dam_name)
-    if not dam:
-        dams = load_and_normalize_dams_dataset()
-        dam = next((d for d in dams if d["dam_name"].strip().lower() == dam_name.strip().lower()), None)
-    if not dam:
-        dam = {"dam_name": dam_name, "latitude": 11.634, "longitude": 92.684, "height_m": 40.0}
-
-    lat, lon = float(dam["latitude"]), float(dam["longitude"])
-    safe_name = dam_name.replace(" ", "_").lower().replace("(", "").replace(")", "").replace("/", "_")
+    safe_name = safe_filename(dam_name)
     shp_dir = f"output_{safe_name}"
+    shutil.rmtree(shp_dir, ignore_errors=True)  # no stale files from earlier runs
     os.makedirs(shp_dir, exist_ok=True)
     zip_path = f"{safe_name}_flood_extent_shapefile.zip"
 
     try:
-        import geopandas as gpd
-        dem, transform, _, _ = fetch_dem_raster(lat, lon, dam_name)
-        res = simulate_hydrodynamic_routing(lat, lon, dem, transform)
-        gj_str = res["geojson"] if isinstance(res["geojson"], str) else json.dumps(res["geojson"])
-        gdf = gpd.GeoDataFrame.from_features(json.loads(gj_str)["features"], crs="EPSG:4326")
-        gdf.to_file(os.path.join(shp_dir, f"{safe_name}_flood_extent.shp"))
+        res, _, _ = _run_screening_for_export(dam_name)
+        _features_gdf(res).to_file(os.path.join(shp_dir, f"{safe_name}_flood_extent.shp"))
     except Exception as e:
         print(f"[SHP Export Notice] {e}")
+        return JSONResponse(status_code=500, content={"error": "Shapefile export failed", "detail": str(e)})
 
     with zipfile.ZipFile(zip_path, "w") as zf:
         for f in os.listdir(shp_dir):
@@ -406,42 +494,86 @@ def download_shapefile(dam_name: str = Query(...)):
 
     return FileResponse(zip_path, media_type="application/zip", filename=zip_path)
 
-# -------------------------------------------------------------------------
-# 7. Google Earth KML Export Endpoint (screening result)
-# -------------------------------------------------------------------------
+
 @app.get("/download-kml")
 def download_kml(dam_name: str = Query(...)):
     if SIM_IMPORT_ERROR is not None:
         return JSONResponse(status_code=503, content=SIM_UNAVAILABLE_RESPONSE)
 
-    dam = UPLOADED_REGISTRY.get(dam_name)
-    if not dam:
-        dams = load_and_normalize_dams_dataset()
-        dam = next((d for d in dams if d["dam_name"].strip().lower() == dam_name.strip().lower()), None)
-    if not dam:
-        dam = {"dam_name": dam_name, "latitude": 11.634, "longitude": 92.684, "height_m": 40.0}
-
-    lat, lon = float(dam["latitude"]), float(dam["longitude"])
-    safe_name = dam_name.replace(" ", "_").lower().replace("(", "").replace(")", "").replace("/", "_")
-    kml_path = f"{safe_name}_flood_extent.kml"
-
+    kml_path = f"{safe_filename(dam_name)}_flood_extent.kml"
     try:
-        import geopandas as gpd
-        dem, transform, _, _ = fetch_dem_raster(lat, lon, dam_name)
-        res = simulate_hydrodynamic_routing(lat, lon, dem, transform)
-        gj_str = res["geojson"] if isinstance(res["geojson"], str) else json.dumps(res["geojson"])
-        gdf = gpd.GeoDataFrame.from_features(json.loads(gj_str)["features"], crs="EPSG:4326")
-        gdf.to_file(kml_path, driver="KML")
+        res, _, _ = _run_screening_for_export(dam_name)
+        _features_gdf(res).to_file(kml_path, driver="KML")
     except Exception as e:
         print(f"[KML Export Notice] {e}")
+        return JSONResponse(status_code=500, content={"error": "KML export failed", "detail": str(e)})
 
     return FileResponse(kml_path, media_type="application/vnd.google-earth.kml+xml", filename=kml_path)
+
+
+@app.get("/download-raster")
+def download_raster(dam_name: str = Query(...)):
+    """Flood mask as a GeoTIFF (1 = flooded). Needs 'flooded_raster' from the routing module."""
+    if SIM_IMPORT_ERROR is not None:
+        return JSONResponse(status_code=503, content=SIM_UNAVAILABLE_RESPONSE)
+
+    tif_path = f"{safe_filename(dam_name)}_flood_extent.tif"
+    try:
+        import rasterio
+        res, transform, profile = _run_screening_for_export(dam_name)
+        arr = res.get("flooded_raster")
+        if arr is None:
+            return JSONResponse(status_code=501, content={"error": "Routing module did not return 'flooded_raster'"})
+        arr = np.asarray(arr).astype("float32")
+        if arr.ndim == 3:
+            arr = arr[0]
+        prof = dict(profile) if profile else {}
+        prof.update(driver="GTiff", dtype="float32", count=1, height=arr.shape[0], width=arr.shape[1],
+                    transform=transform, nodata=0)
+        if "crs" not in prof or prof["crs"] is None:
+            prof["crs"] = "EPSG:4326"
+        with rasterio.open(tif_path, "w", **prof) as dst:
+            dst.write(arr, 1)
+    except Exception as e:
+        print(f"[Raster Export Notice] {e}")
+        return JSONResponse(status_code=500, content={"error": "Raster export failed", "detail": str(e)})
+
+    return FileResponse(tif_path, media_type="image/tiff", filename=tif_path)
+
+
+# -------------------------------------------------------------------------
+# 7. Field observations (stored on disk; no external relay is performed)
+# -------------------------------------------------------------------------
+@app.post("/field-observation")
+def field_observation(payload: dict = Body(...)):
+    record = {"received_at": datetime.utcnow().isoformat() + "Z", **payload}
+    try:
+        with open(OBS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": "Could not store observation", "detail": str(e)})
+    return {
+        "status": "stored",
+        "relayed_to_ndrf": False,  # stored locally only; real relay needs an NDRF integration
+        "received_at": record["received_at"],
+    }
+
+
+@app.get("/field-observations")
+def list_field_observations(limit: int = 50):
+    if not os.path.exists(OBS_FILE):
+        return []
+    with open(OBS_FILE, encoding="utf-8") as f:
+        lines = f.readlines()[-max(1, min(limit, 500)):]
+    return [json.loads(l) for l in lines if l.strip()]
+
 
 # -------------------------------------------------------------------------
 # 8. Validated ANUGA results for Hidkal (precomputed in Google Colab)
 # -------------------------------------------------------------------------
 HIDKAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hidkal_anuga")
 HIDKAL_SCENARIOS = ("froehlich", "paper_peak")
+
 
 @app.get("/validated/hidkal")
 def validated_hidkal():
@@ -450,6 +582,7 @@ def validated_hidkal():
         return JSONResponse(status_code=404, content={"error": "hidkal_anuga/hidkal_summary.json not found"})
     with open(path, encoding="utf-8") as f:
         return JSONResponse(content=json.load(f))
+
 
 @app.get("/validated/hidkal/{scenario}")
 def validated_hidkal_flood(scenario: str):
@@ -460,6 +593,7 @@ def validated_hidkal_flood(scenario: str):
         return JSONResponse(status_code=404, content={"error": f"hidkal_anuga/hidkal_{scenario}_flood.geojson not found"})
     with open(path, encoding="utf-8") as f:
         return JSONResponse(content=json.load(f))
+
 
 if __name__ == "__main__":
     import uvicorn
