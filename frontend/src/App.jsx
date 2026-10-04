@@ -30,21 +30,21 @@ const fmtVal = (v) => (v != null && v !== '' ? v : '—');
 export default function App() {
   // 1. DATASET, ACTIVE DAM & DEM UPLOAD
   const [dams, setDams] = useState(() => (Array.isArray(damsDataset) && damsDataset.length > 0 ? damsDataset : []));
-  const [selectedDam, setSelectedDam] = useState('Chouldari Dam');
+  const [selectedDam, setSelectedDam] = useState('Bhakra Dam');
   const [searchTerm, setSearchTerm] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   const searchBoxRef = useRef(null);
   const fileInputRef = useRef(null);
 
-  const [uploadedDemMeta, setUploadedDemMeta] = useState({
-    fileName: 'chouldari.kml',
-    damName: 'Chouldari Dam',
-    resolution: '30 m (GLO-30)',
-    grid: '1024 × 1024',
-    crs: 'EPSG:4326',
-    latitude: 11.634,
-    longitude: 92.684
-  });
+ const [uploadedDemMeta, setUploadedDemMeta] = useState({
+  fileName: 'Dams.csv',
+  damName: 'Bhakra Dam',
+  resolution: '30 m (GLO-30)',
+  grid: '1024 × 1024',
+  crs: 'EPSG:4326',
+  latitude: 31.4113,
+  longitude: 76.4335
+});
   const [isUploading, setIsUploading] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [uploadError, setUploadError] = useState(null);
@@ -54,8 +54,8 @@ export default function App() {
     if (found) return found;
     return {
       dam_name: uploadedDemMeta.damName || selectedDam,
-      latitude: uploadedDemMeta.latitude || 11.634,
-      longitude: uploadedDemMeta.longitude || 92.684,
+      latitude: uploadedDemMeta.latitude || 31.4113,
+      longitude: uploadedDemMeta.longitude || 76.4335,
       height_m: 35.0,
       state: 'Andaman & Nicobar',
       district: 'South Andaman',
