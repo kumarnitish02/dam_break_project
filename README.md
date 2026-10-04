@@ -49,9 +49,6 @@ potential flood impacts and support emergency planning.
 
 ## 📸 Project Preview
 
-> Add the dashboard screenshot to
-> `screenshots/hydrovision-dashboard.png` in this repository.
-
 ![HYDROVISION Dashboard](screenshots/hydrovision-dashboard.png)
 
 The dashboard provides a single operational view of dam selection,
@@ -360,7 +357,7 @@ dam_break_project/
 
 Make sure the following are installed:
 
--   **Python 3.10+**
+-   **Python 3.11+** (tested on 3.14)
 -   **Node.js 18+**
 -   **npm**
 -   Git
@@ -446,16 +443,32 @@ http://localhost:5173
 
 ## ▶️ Running the Backend
 
-The exact backend entry point depends on the current project
-configuration. If the FastAPI application is exposed through an `app`
-object, a typical command is:
-
 ``` bash
-uvicorn <module_name>:app --reload
+python -m uvicorn main:app --reload --port 8000
 ```
 
-Replace `<module_name>` with the Python module containing the FastAPI
-application.
+### First-time setup: Earth Engine
+
+DEM tiles for dams that are not cached locally are downloaded from Google
+Earth Engine. Authenticate once before running a simulation:
+
+``` bash
+earthengine authenticate
+```
+
+### Troubleshooting
+
+-   **"DLL load failed ... An Application Control policy has blocked this file"**
+    Windows Smart App Control is blocking a compiled Python module (for
+    example rasterio). Turn Smart App Control off, or run the backend on
+    WSL2, Linux or Colab.
+-   **Run Simulation returns 404 "Dam not found"**
+    The dam name is not in `Dams.csv`. Pick a dam from the dropdown, or
+    upload a KML/DEM for it first (uploaded dams are kept in memory and
+    are lost when the backend restarts).
+-   **Port 8000 already in use**
+    Stop the other backend process, or start with `--port 8001` and
+    update `API_BASE` in `frontend/src/App.jsx`.
 
 ------------------------------------------------------------------------
 
