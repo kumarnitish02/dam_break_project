@@ -14,3 +14,4 @@ build/
 
 dem_cache/
 field_observations.jsonl
+uploaded_dem/
