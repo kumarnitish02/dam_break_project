@@ -57,9 +57,9 @@ export default function App() {
       latitude: uploadedDemMeta.latitude || 31.4113,
       longitude: uploadedDemMeta.longitude || 76.4335,
       height_m: 35.0,
-      state: 'Andaman & Nicobar',
-      district: 'South Andaman',
-      river: 'Dhanikhari'
+      state: 'India',
+      district: '',
+      river: ''
     };
   }, [selectedDam, dams, uploadedDemMeta]);
 
